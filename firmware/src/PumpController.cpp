@@ -18,7 +18,7 @@ void PumpController::begin() {
     ledcAttachPin(pwmPin, pwmChannel);
     ledcWrite(pwmChannel, 0);
     
-    Serial.println("泵控制器初始化完成");
+    Serial.println("Pump controller initialized");
 }
 
 void PumpController::setSpeed(uint8_t speed) {
@@ -29,7 +29,7 @@ void PumpController::setSpeed(uint8_t speed) {
     if (running) {
         uint8_t pwm_value = map(speed, 0, 100, 0, 255);
         ledcWrite(pwmChannel, pwm_value);
-        Serial.printf("泵速度设置为: %d%%\n", speed);
+        Serial.printf("Pump speed set to: %d%%\n", speed);
     }
 }
 
@@ -37,11 +37,11 @@ void PumpController::start() {
     running = true;
     uint8_t pwm_value = map(currentSpeed, 0, 100, 0, 255);
     ledcWrite(pwmChannel, pwm_value);
-    Serial.printf("泵启动，速度: %d%%\n", currentSpeed);
+    Serial.printf("Pump started, speed: %d%%\n", currentSpeed);
 }
 
 void PumpController::stop() {
     running = false;
     ledcWrite(pwmChannel, 0);
-    Serial.println("泵停止");
+    Serial.println("Pump stopped");
 }

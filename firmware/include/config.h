@@ -9,61 +9,60 @@
 #include <Arduino.h>
 
 // ============ GPIO引脚定义 ============
+// 根据 README.md 更新的引脚映射
 
-// MAX31855热电偶模块 (SPI)
-#define THERMO_1_CLK_PIN    2   // SCK
-#define THERMO_1_CS_PIN     3   // CS
-#define THERMO_1_MISO_PIN   10  // MISO
-
-// 第二个热电偶（如果需要）
-#define THERMO_2_CLK_PIN    2   // 共享SCK
-#define THERMO_2_CS_PIN     4   // 独立CS
-#define THERMO_2_MISO_PIN   10  // 共享MISO
+// 状态LED
+#define LED1_PIN            0   // LED2 (GPIO0)
+#define LED2_PIN            3   // LED1 (GPIO3)
 
 // 加热片控制 (PWM)
-#define HEATING_PAD_PIN     5   // 使用MOSFET驱动
+#define HEATING_PAD_PIN     1   // GPIO1 PWM控制加热丝
 
-// 真空泵控制 (通过L298N)
-#define PUMP_PWM_PIN        6   // PWM控制
-#define PUMP_DIR_PIN        7   // 方向控制（可选）
+// 真空泵控制 (PWM)
+#define PUMP_PWM_PIN        2   // GPIO2 PWM控制负压泵
 
-// 压力传感器 XGZ6897d (I2C或模拟)
-#define PRESSURE_SDA_PIN    8   // I2C数据
-#define PRESSURE_SCL_PIN    9   // I2C时钟
+// MAX31855热电偶模块 (SPI)
+#define THERMO_CLK_PIN      4   // GPIO4 SCK
+#define THERMO_MISO_PIN     5   // GPIO5 MISO
+#define THERMO_CS_PIN       7   // GPIO7 CS
 
-// 蜂鸣器
-#define BUZZER_PIN          18  // PWM输出
+// 蜂鸣器 (PWM, 2.731kHz)
+#define BUZZER_PIN          6   // GPIO6 PWM输出
+
+// 压力传感器 XGZP6897D (I2C)
+#define PRESSURE_SDA_PIN    8   // GPIO8 I2C SDA
+#define PRESSURE_SCL_PIN    9   // GPIO9 I2C SCL
 
 // 按键
-#define BUTTON_POWER_PIN    19  // 电源/模式按键（带自锁）
-#define BUTTON_UP_PIN       20  // 增加按键
-#define BUTTON_DOWN_PIN     21  // 减少按键
-
-// 状态LED（如果有）
-#define LED_STATUS_PIN      1   // 内置LED或外部LED
+#define BUTTON_STOP_PIN     10  // GPIO10 急停按键 (原为GPIO11，但GPIO11保留，用GPIO10)
+#define BUTTON_UP_PIN       20  // GPIO20 增加负压档位
+#define BUTTON_DOWN_PIN     21  // GPIO21 减少负压档位
 
 // ============ 系统参数 ============
 
 // 温度控制参数
-#define TEMP_TARGET_DEFAULT 37.0f   // 默认目标温度（°C）
-#define TEMP_MAX_LIMIT      42.0f   // 最高温度限制
-#define TEMP_MIN_LIMIT      30.0f   // 最低温度限制
+#define TEMP_TARGET_DEFAULT 40.0f   // 默认目标温度（°C）- 固定40度
+#define TEMP_MAX_LIMIT      50.0f   // 最高温度限制
+#define TEMP_MIN_LIMIT      35.0f   // 最低温度限制
 #define TEMP_HYSTERESIS     0.5f    // 温度回差（°C）
 
-// 压力控制参数
-#define PRESSURE_TARGET_DEFAULT -2.0f  // 默认目标压力（kPa，负值表示负压）
-#define PRESSURE_MAX_LIMIT  -0.5f      // 最小负压（安全）
-#define PRESSURE_MIN_LIMIT  -5.0f      // 最大负压（不超过传感器量程）
+// 压力控制参数（负压）
+#define PRESSURE_TARGET_DEFAULT 15.0f  // 默认目标负压（mmHg）- 固定15mmHg
+#define PRESSURE_MIN_GEAR   10.0f      // 最小档位负压 (mmHg)
+#define PRESSURE_MAX_GEAR   100.0f     // 最大档位负压 (mmHg)
+#define PRESSURE_GEAR_STEP  10.0f      // 每档增减 10%
+#define PRESSURE_NUM_GEARS  10         // 总共10档
 
 // PWM参数
-#define PWM_FREQUENCY       5000    // PWM频率 (Hz)
+#define PWM_FREQUENCY       5000    // PWM频率 (Hz) - 加热和泵
+#define PWM_BUZZER_FREQ     2731    // 蜂鸣器频率 (Hz) - 2.731kHz
 #define PWM_RESOLUTION      8       // PWM分辨率 (8位 = 0-255)
 #define PWM_CHANNEL_HEAT    0       // 加热PWM通道
 #define PWM_CHANNEL_PUMP    1       // 泵PWM通道
 #define PWM_CHANNEL_BUZZER  2       // 蜂鸣器PWM通道
 
 // 安全参数
-#define TEMP_EMERGENCY_STOP 45.0f   // 紧急停机温度
+#define TEMP_EMERGENCY_STOP 50.0f   // 紧急停机温度
 #define OVERHEAT_TIMEOUT_MS 3000    // 过热超时时间(ms)
 
 // FreeRTOS任务优先级

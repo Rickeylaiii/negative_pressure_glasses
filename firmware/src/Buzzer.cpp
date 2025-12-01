@@ -14,7 +14,7 @@ void Buzzer::begin() {
     ledcSetup(pwmChannel, 2731, 8); // HY9055谐振频率2731Hz
     ledcAttachPin(buzzerPin, pwmChannel);
     ledcWrite(pwmChannel, 0);
-    Serial.println("蜂鸣器初始化完成");
+    Serial.println("Buzzer Init Success");
 }
 
 void Buzzer::tone(uint16_t frequency, uint32_t duration) {

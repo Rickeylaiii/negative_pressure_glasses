@@ -20,27 +20,27 @@ void HeatingController::begin() {
     ledcAttachPin(heatingPin, pwmChannel);
     ledcWrite(pwmChannel, 0);
     
-    Serial.println("加热控制器初始化完成");
+    Serial.println("Heating Controller Init Success");
 }
 
 void HeatingController::setTargetTemperature(float target) {
     if (target >= TEMP_MIN_LIMIT && target <= TEMP_MAX_LIMIT) {
         targetTemp = target;
-        Serial.printf("设置目标温度: %.1f°C\n", target);
+        Serial.printf("Set Target Temperature: %.1fC\n", target);
         
-        // 重置PID
+        // Reset PID
         integral = 0.0f;
         lastError = 0.0f;
     } else {
-        Serial.printf("温度超出范围: %.1f°C\n", target);
+        Serial.printf("Temperature out of range: %.1fC\n", target);
     }
 }
 
 float HeatingController::calculatePID(float error, float dt) {
-    // 比例项
+    // Proportional term
     float p = kp * error;
     
-    // 积分项（带限幅）
+    // Integral term (with clamping)
     integral += error * dt;
     if (integral > INTEGRAL_MAX) integral = INTEGRAL_MAX;
     if (integral < -INTEGRAL_MAX) integral = -INTEGRAL_MAX;
@@ -66,15 +66,24 @@ uint8_t HeatingController::update(float current_temp) {
     // 安全检查
     if (current_temp >= TEMP_EMERGENCY_STOP) {
         emergencyStop();
-        Serial.println("温度过高！紧急停止加热！");
+        Serial.println("Temperature too high! Emergency stop heating!");
         return 0;
     }
     
-    // 计算误差
+    // Calculate error
     float error = targetTemp - current_temp;
     
-    // PID控制（假设更新周期为CONTROL_UPDATE_PERIOD_MS）
-    float dt = CONTROL_UPDATE_PERIOD_MS / 1000.0f;
+    // 修正: 使用实际调用间隔,而不是配置中的固定值
+    static uint32_t lastUpdateTime = 0;
+    uint32_t currentTime = millis();
+    float dt = (currentTime - lastUpdateTime) / 1000.0f;
+    
+    // 首次调用,使用默认1秒
+    if (lastUpdateTime == 0) {
+        dt = 1.0f;
+    }
+    lastUpdateTime = currentTime;
+    
     float output = calculatePID(error, dt);
     
     // 限幅
@@ -92,14 +101,14 @@ void HeatingController::enable() {
     // 重置PID
     integral = 0.0f;
     lastError = 0.0f;
-    Serial.println("加热已启用");
+    Serial.println("Heating Enabled");
 }
 
 void HeatingController::disable() {
     enabled = false;
     currentOutput = 0;
     ledcWrite(pwmChannel, 0);
-    Serial.println("加热已禁用");
+    Serial.println("Heating Disabled");
 }
 
 void HeatingController::emergencyStop() {
@@ -108,5 +117,21 @@ void HeatingController::emergencyStop() {
     ledcWrite(pwmChannel, 0);
     integral = 0.0f;
     lastError = 0.0f;
-    Serial.println("紧急停止！");
+    Serial.println("Emergency Stop!");
+}
+
+void HeatingController::reset() {
+    integral = 0.0f;
+    lastError = 0.0f;
+    currentOutput = 0;
+    Serial.println("PID reset");
+}
+
+void HeatingController::setPID(float p, float i, float d) {
+    kp = p;
+    ki = i;
+    kd = d;
+    Serial.printf("PID updated: Kp=%.2f, Ki=%.2f, Kd=%.2f\n", kp, ki, kd);
+    // Reset integral when changing parameters
+    integral = 0.0f;
 }

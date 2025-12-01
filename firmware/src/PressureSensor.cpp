@@ -1,6 +1,12 @@
 /**
  * @file PressureSensor.cpp
- * @brief 压力传感器实现
+ * @brief CPS610DSD003DH01 压力传感器实现
+ * 
+ * 通信协议:
+ * 1. 向0x30寄存器写入0x0A触发采集
+ * 2. 等待5-10ms
+ * 3. 从0x06-0x08读取24位数据
+ * 4. 转换公式: P(kPa) = 7.5 * (raw/8388608) - 3.75
  */
 
 #include "PressureSensor.h"
@@ -16,66 +22,128 @@ bool PressureSensor::begin() {
     
     delay(100);
     
-    // 尝试读取传感器
+    Serial.printf("Initializing CPS610DSD003DH01 at address 0x%02X...\n", i2cAddr);
+    
+    // 检查I2C设备是否存在
     Wire.beginTransmission(i2cAddr);
     uint8_t error = Wire.endTransmission();
     
     if (error != 0) {
-        Serial.printf("压力传感器初始化失败！I2C错误代码: %d\n", error);
+        Serial.printf("X I2C device not found! Error code: %d\n", error);
+        Serial.println("  Possible issues:");
+        Serial.println("  1. Check I2C wiring (SDA/SCL)");
+        Serial.println("  2. Check power supply");
+        Serial.println("  3. Verify I2C address is 0x7F");
         return false;
     }
+    
+    Serial.println("OK I2C device detected");
+    
+    // 尝试触发一次采集并读取
+    if (!startMeasurement()) {
+        Serial.println("X Failed to start measurement");
+        return false;
+    }
+    
+    delay(10); // 等待采集完成
     
     // 读取初始值
     float pressure = readPressure();
     if (isnan(pressure)) {
-        Serial.println("压力传感器读取失败！");
+        Serial.println("X Failed to read pressure during initialization");
         return false;
     }
     
-    Serial.printf("压力传感器初始化成功，当前压力: %.2f kPa\n", pressure);
+    Serial.printf("OK CPS610DSD003DH01 initialized, current: %.3f kPa\n", pressure);
     return true;
 }
 
-uint16_t PressureSensor::readRawData() {
+bool PressureSensor::startMeasurement() {
+    // 向0x30寄存器写入0x0A触发采集
     Wire.beginTransmission(i2cAddr);
-    Wire.write(0x00); // 读取命令（根据实际传感器调整）
+    Wire.write(CMD_REG);      // 寄存器地址 0x30
+    Wire.write(CMD_START);    // 命令 0x0A
+    uint8_t error = Wire.endTransmission();
+    
+    if (error != 0) {
+        Serial.printf("X Failed to start measurement, I2C error: %d\n", error);
+        return false;
+    }
+    
+    return true;
+}
+
+int32_t PressureSensor::readRaw24bit() {
+    // 从0x06开始读取3个字节
+    Wire.beginTransmission(i2cAddr);
+    Wire.write(DATA_REG_H);  // 从0x06开始
     uint8_t error = Wire.endTransmission(false);
     
     if (error != 0) {
-        return 0xFFFF; // 错误标记
+        Serial.printf("X Failed to set read pointer, error: %d\n", error);
+        return 0x7FFFFFFF; // 错误标记
     }
     
-    Wire.requestFrom(i2cAddr, (uint8_t)2);
+    // 请求3个字节: 0x06(H), 0x07(M), 0x08(L)
+    Wire.requestFrom(i2cAddr, (uint8_t)3);
     
-    if (Wire.available() >= 2) {
-        uint16_t raw = Wire.read() << 8;
-        raw |= Wire.read();
-        return raw;
+    if (Wire.available() < 3) {
+        Serial.printf("X Not enough data available: %d bytes\n", Wire.available());
+        return 0x7FFFFFFF;
     }
     
-    return 0xFFFF; // 错误标记
+    uint8_t byteH = Wire.read();  // 高字节 [23:16]
+    uint8_t byteM = Wire.read();  // 中字节 [15:8]
+    uint8_t byteL = Wire.read();  // 低字节 [7:0]
+    
+    // 拼接24位数据
+    int32_t raw24 = ((int32_t)byteH << 16) | ((int32_t)byteM << 8) | byteL;
+    
+    // 处理24位有符号数的符号扩展
+    // 如果最高位(bit 23)为1,说明是负数,需要扩展符号位
+    if (raw24 & 0x800000) {
+        raw24 |= 0xFF000000;  // 符号扩展到32位
+    }
+    
+    return raw24;
 }
 
-float PressureSensor::convertToPressure(uint16_t raw) {
-    if (raw == 0xFFFF) {
-        return NAN;
+float PressureSensor::convertToPressure(int32_t raw24) {
+    if (raw24 == 0x7FFFFFFF) {
+        return NAN;  // 错误标记
     }
     
-    // XGZ6897d 转换公式（根据实际数据手册调整）
-    // 假设：0-16384对应-5kPa到+5kPa
-    // 实际公式需要根据传感器数据手册调整
-    float pressure = ((float)raw / 16384.0f) * 10.0f - 5.0f;
+    // CPS610DSD003DH01 转换公式:
+    // Code = raw24 / 8388608.0
+    // P(kPa) = 7.5 * Code - 3.75
+    float code = (float)raw24 / DIVISOR;
+    float pressure = COEF_A * code + COEF_B;
     
     return pressure - zeroOffset;
 }
 
 float PressureSensor::readPressure() {
-    uint16_t raw = readRawData();
-    float pressure = convertToPressure(raw);
+    // 触发采集
+    if (!startMeasurement()) {
+        errorCount++;
+        if (errorCount >= MAX_ERROR_COUNT) {
+            return NAN;
+        }
+        return lastPressure;
+    }
+    
+    // 等待采集完成 (5-10ms)
+    delay(8);
+    
+    // 读取原始数据
+    int32_t raw24 = readRaw24bit();
+    
+    // 转换为压力值
+    float pressure = convertToPressure(raw24);
     
     if (isnan(pressure)) {
         errorCount++;
-        Serial.println("压力读取错误！");
+        Serial.println("X Pressure read error");
         
         if (errorCount >= MAX_ERROR_COUNT) {
             return NAN;
@@ -89,28 +157,42 @@ float PressureSensor::readPressure() {
 }
 
 void PressureSensor::calibrateZero() {
-    Serial.println("开始压力传感器零点校准...");
+    Serial.println("Starting zero calibration...");
+    Serial.println("Ensure sensor is at atmospheric pressure (no pressure difference)");
     
     float sum = 0.0f;
     int count = 0;
     
-    // 采集10次取平均
+    // 采集10个样本并求平均
     for (int i = 0; i < 10; i++) {
-        uint16_t raw = readRawData();
-        float pressure = convertToPressure(raw);
+        if (!startMeasurement()) {
+            Serial.printf("  Sample %d: Failed to trigger\n", i+1);
+            continue;
+        }
+        
+        delay(10);
+        
+        int32_t raw24 = readRaw24bit();
+        float pressure = convertToPressure(raw24);
         
         if (!isnan(pressure)) {
             sum += pressure + zeroOffset; // 加回之前的偏移
             count++;
+            Serial.printf("  Sample %d: %.3f kPa (raw=%d)\n", i+1, pressure + zeroOffset, raw24);
+        } else {
+            Serial.printf("  Sample %d: Read failed\n", i+1);
         }
+        
         delay(100);
     }
     
     if (count > 0) {
         zeroOffset = sum / count;
-        Serial.printf("零点校准完成，偏移值: %.3f kPa\n", zeroOffset);
+        Serial.printf("OK Zero calibration completed\n");
+        Serial.printf("   Offset: %.3f kPa (based on %d samples)\n", zeroOffset, count);
+        Serial.printf("   Expected: ~0 kPa at atmospheric pressure\n");
     } else {
-        Serial.println("零点校准失败！");
+        Serial.println("X Zero calibration failed - no valid samples");
     }
 }
 

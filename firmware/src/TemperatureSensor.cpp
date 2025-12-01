@@ -16,12 +16,12 @@ bool TemperatureSensor::begin() {
     // 尝试读取一次测试
     float temp = thermocouple->readCelsius();
     if (isnan(temp)) {
-        Serial.println("温度传感器初始化失败！");
+        Serial.println("Temperature sensor initialization failed!");
         return false;
     }
     
     lastTemp = temp;
-    Serial.printf("温度传感器初始化成功，当前温度: %.2f°C\n", temp);
+    Serial.printf("Temperature sensor initialized successfully, current temperature: %.2f°C\n", temp);
     return true;
 }
 
@@ -30,7 +30,7 @@ float TemperatureSensor::readTemperature() {
     
     if (isnan(temp)) {
         errorCount++;
-        Serial.println("温度读取错误！");
+        Serial.println("Temperature read error!");
         
         // 如果连续多次错误，返回NAN
         if (errorCount >= MAX_ERROR_COUNT) {

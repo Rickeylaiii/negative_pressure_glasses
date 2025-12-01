@@ -51,6 +51,21 @@ public:
     void emergencyStop();
     
     /**
+     * @brief 重置PID状态
+     */
+    void reset();
+    
+    /**
+     * @brief 设置PID参数
+     */
+    void setPID(float p, float i, float d);
+    
+    /**
+     * @brief 获取PID参数
+     */
+    void getPID(float& p, float& i, float& d) const { p = kp; i = ki; d = kd; }
+    
+    /**
      * @brief 获取当前输出功率百分比
      * @return 功率百分比（0-100）
      */
@@ -70,13 +85,13 @@ private:
     uint8_t currentOutput;
     bool enabled;
     
-    // PID参数
-    float kp = 25.0f;   // 比例系数
-    float ki = 0.5f;    // 积分系数
-    float kd = 5.0f;    // 微分系数
+    // PID参数 (调整后更保守,避免超调)
+    float kp = 20.0f;   // 比例系数 (降低)
+    float ki = 1.0f;    // 积分系数
+    float kd = 2.0f;    // 微分系数 (降低)
     
     // 限幅
-    static const float INTEGRAL_MAX = 100.0f;
+    static constexpr float INTEGRAL_MAX = 100.0f;
     static const uint8_t OUTPUT_MIN = 0;
     static const uint8_t OUTPUT_MAX = 255;
     

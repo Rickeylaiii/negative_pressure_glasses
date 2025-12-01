@@ -1,395 +1,310 @@
 /**
- * @file main.cpp
- * @brief 带加热负压眼镜主程序 - FreeRTOS多任务实现
+ * @file test_buzzer.cpp
+ * @brief Electronic Keyboard Simulator - 电子琴模拟器
  * 
- * 系统架构：
- * - 温度监控任务：读取热电偶温度，检测过温
- * - 压力监控任务：读取压力传感器，调节真空泵
- * - 加热控制任务：PID温度控制
- * - 用户界面任务：按键处理和蜂鸣器反馈
+ * 功能：
+ * - 用A,S,D,F,G,H,J,K模拟钢琴音阶 (Do Re Mi Fa Sol La Si Do)
+ * - 实时按键发声，松开停止
+ * - 支持持续按住发声
+ * - LED随按键闪烁
+ * 
+ * 按键映射：
+ * - A: Do  (C4 - 262Hz)
+ * - S: Re  (D4 - 294Hz)
+ * - D: Mi  (E4 - 330Hz)
+ * - F: Fa  (F4 - 349Hz)
+ * - G: Sol (G4 - 392Hz)
+ * - H: La  (A4 - 440Hz)
+ * - J: Si  (B4 - 494Hz)
+ * - K: Do' (C5 - 523Hz)
+ * - Space: 停止发声
+ * - Q: 退出电子琴模式
+ * 
+ * 使用方法：
+ * 1. 重命名此文件为 main.cpp
+ * 2. 备份原 main.cpp
+ * 3. 编译上传
+ * 4. 打开串口监视器，输入字母弹奏
  */
 
 #include <Arduino.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <freertos/semphr.h>
-#include <freertos/queue.h>
-
 #include "config.h"
-#include "TemperatureSensor.h"
-#include "PressureSensor.h"
-#include "HeatingController.h"
-#include "PumpController.h"
 #include "Buzzer.h"
-#include "Button.h"
 
-// ============ 全局对象 ============
-TemperatureSensor* tempSensor1;
-TemperatureSensor* tempSensor2; // 可选第二个温度传感器
-PressureSensor* pressureSensor;
-HeatingController* heatingCtrl;
-PumpController* pumpCtrl;
+// LED 引脚
+#define LED_PIN 8
+
+// 蜂鸣器对象
 Buzzer* buzzer;
-Button* btnPower;
-Button* btnUp;
-Button* btnDown;
 
-// ============ 互斥锁和信号量 ============
-SemaphoreHandle_t xSerialMutex;      // 串口打印互斥锁
-SemaphoreHandle_t xTempMutex;        // 温度数据互斥锁
-SemaphoreHandle_t xPressureMutex;    // 压力数据互斥锁
+// 音符频率定义（简易音阶）
+#define NOTE_C4  262
+#define NOTE_D4  294
+#define NOTE_E4  330
+#define NOTE_F4  349
+#define NOTE_G4  392
+#define NOTE_A4  440 
+#define NOTE_B4  494
+#define NOTE_C5  523
 
-// ============ 共享数据 ============
-struct SystemState {
-    float currentTemp;
-    float targetTemp;
-    float currentPressure;
-    float targetPressure;
-    bool heatingEnabled;
-    bool pumpEnabled;
-    bool emergencyStop;
-} sysState;
+// 蜂鸣器默认频率（如果 config.h 中没有定义）
+#ifndef BUZZER_FREQUENCY
+#define BUZZER_FREQUENCY 2731
+#endif
 
-// ============ 任务句柄 ============
-TaskHandle_t xTaskTemperatureHandle = NULL;
-TaskHandle_t xTaskPressureHandle = NULL;
-TaskHandle_t xTaskHeatingHandle = NULL;
-TaskHandle_t xTaskUIHandle = NULL;
+void playMelody();
+void playStartupSound();
 
-// ============ 任务函数声明 ============
-void taskTemperatureMonitor(void* parameter);
-void taskPressureMonitor(void* parameter);
-void taskHeatingControl(void* parameter);
-void taskUserInterface(void* parameter);
-
-// ============ 辅助函数 ============
-void safePrint(const char* format, ...);
-void initializeHardware();
-void initializeSystem();
-
-/**
- * @brief Arduino setup函数
- */
 void setup() {
+    // 初始化串口
     Serial.begin(115200);
-    delay(1000);
+    
+    uint32_t startTime = millis();
+    while (!Serial && (millis() - startTime < 3000)) {
+        delay(10);
+    }
+    delay(500);
+    
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
+    
     Serial.println("\n\n========================================");
-    Serial.println("FSYX OPAP 带加热负压眼镜系统启动");
+    Serial.println("Buzzer Test Program");
+    Serial.println("========================================");
+    Serial.printf("Chip: %s @ %dMHz\n", ESP.getChipModel(), ESP.getCpuFreqMHz());
     Serial.println("========================================\n");
     
-    // 初始化硬件
-    initializeHardware();
+    // 显示蜂鸣器配置
+    Serial.println("Buzzer Config:");
+    Serial.printf("  Pin: GPIO%d\n", BUZZER_PIN);
+    Serial.printf("  PWM Channel: %d\n", PWM_CHANNEL_BUZZER);
+    Serial.printf("  Default Frequency: %d Hz\n", BUZZER_FREQUENCY);
+    Serial.println();
     
-    // 初始化系统状态
-    initializeSystem();
-    
-    // 创建互斥锁
-    xSerialMutex = xSemaphoreCreateMutex();
-    xTempMutex = xSemaphoreCreateMutex();
-    xPressureMutex = xSemaphoreCreateMutex();
-    
-    // 创建FreeRTOS任务
-    xTaskCreatePinnedToCore(
-        taskTemperatureMonitor,           // 任务函数
-        "Temperature",                     // 任务名称
-        TASK_STACK_SIZE_MEDIUM,           // 栈大小
-        NULL,                              // 参数
-        TASK_PRIORITY_HIGH,               // 优先级（高）
-        &xTaskTemperatureHandle,          // 任务句柄
-        0                                  // CPU核心0
-    );
-    
-    xTaskCreatePinnedToCore(
-        taskPressureMonitor,
-        "Pressure",
-        TASK_STACK_SIZE_MEDIUM,
-        NULL,
-        TASK_PRIORITY_HIGH,
-        &xTaskPressureHandle,
-        0
-    );
-    
-    xTaskCreatePinnedToCore(
-        taskHeatingControl,
-        "Heating",
-        TASK_STACK_SIZE_MEDIUM,
-        NULL,
-        TASK_PRIORITY_NORMAL,
-        &xTaskHeatingHandle,
-        1                                  // CPU核心1
-    );
-    
-    xTaskCreatePinnedToCore(
-        taskUserInterface,
-        "UI",
-        TASK_STACK_SIZE_LARGE,
-        NULL,
-        TASK_PRIORITY_LOW,
-        &xTaskUIHandle,
-        1
-    );
-    
-    Serial.println("所有任务已创建，系统运行中...\n");
-    buzzer->beep();
-}
-
-/**
- * @brief Arduino loop函数（FreeRTOS接管后基本不用）
- */
-void loop() {
-    vTaskDelay(pdMS_TO_TICKS(1000));
-}
-
-/**
- * @brief 初始化所有硬件
- */
-void initializeHardware() {
-    Serial.println("初始化硬件...");
-    
-    // 创建传感器对象
-    tempSensor1 = new TemperatureSensor(THERMO_1_CLK_PIN, THERMO_1_CS_PIN, THERMO_1_MISO_PIN);
-    tempSensor2 = new TemperatureSensor(THERMO_2_CLK_PIN, THERMO_2_CS_PIN, THERMO_2_MISO_PIN);
-    pressureSensor = new PressureSensor(PRESSURE_SDA_PIN, PRESSURE_SCL_PIN);
-    
-    // 创建控制器对象
-    heatingCtrl = new HeatingController(HEATING_PAD_PIN, PWM_CHANNEL_HEAT);
-    pumpCtrl = new PumpController(PUMP_PWM_PIN, PWM_CHANNEL_PUMP);
+    // 初始化蜂鸣器
     buzzer = new Buzzer(BUZZER_PIN, PWM_CHANNEL_BUZZER);
-    
-    // 创建按键对象
-    btnPower = new Button(BUTTON_POWER_PIN);
-    btnUp = new Button(BUTTON_UP_PIN);
-    btnDown = new Button(BUTTON_DOWN_PIN);
-    
-    // 初始化
-    if (!tempSensor1->begin()) {
-        Serial.println("警告：温度传感器1初始化失败！");
-    }
-    
-    if (!pressureSensor->begin()) {
-        Serial.println("警告：压力传感器初始化失败！");
-    }
-    
-    heatingCtrl->begin();
-    pumpCtrl->begin();
     buzzer->begin();
     
-    btnPower->begin();
-    btnUp->begin();
-    btnDown->begin();
+    Serial.println("OK Buzzer initialized");
+    Serial.println();
     
-    Serial.println("硬件初始化完成\n");
-}
-
-/**
- * @brief 初始化系统状态
- */
-void initializeSystem() {
-    sysState.currentTemp = 0.0f;
-    sysState.targetTemp = TEMP_TARGET_DEFAULT;
-    sysState.currentPressure = 0.0f;
-    sysState.targetPressure = PRESSURE_TARGET_DEFAULT;
-    sysState.heatingEnabled = false;
-    sysState.pumpEnabled = false;
-    sysState.emergencyStop = false;
+    Serial.println("=== ELECTRONIC KEYBOARD MODE ===");
+    Serial.println();
+    Serial.println("Keyboard Mapping:");
+    Serial.println("  A - Do  (C4 - 262Hz)");
+    Serial.println("  S - Re  (D4 - 294Hz)");
+    Serial.println("  D - Mi  (E4 - 330Hz)");
+    Serial.println("  F - Fa  (F4 - 349Hz)");
+    Serial.println("  G - Sol (G4 - 392Hz)");
+    Serial.println("  H - La  (A4 - 440Hz)");
+    Serial.println("  J - Si  (B4 - 494Hz)");
+    Serial.println("  K - Do' (C5 - 523Hz)");
+    Serial.println();
+    Serial.println("Special Commands:");
+    Serial.println("  Space - Stop sound");
+    Serial.println("  0 - Play scale (Do Re Mi Fa Sol La Si Do)");
+    Serial.println("  9 - Demo song");
+    Serial.println("  Q - Quit (show all commands)");
+    Serial.println();
+    Serial.println("================================");
+    Serial.println();
     
-    heatingCtrl->setTargetTemperature(sysState.targetTemp);
-}
-
-/**
- * @brief 线程安全的串口打印
- */
-void safePrint(const char* format, ...) {
-    if (xSemaphoreTake(xSerialMutex, portMAX_DELAY) == pdTRUE) {
-        va_list args;
-        va_start(args, format);
-        char buffer[256];
-        vsnprintf(buffer, sizeof(buffer), format, args);
-        Serial.print(buffer);
-        va_end(args);
-        xSemaphoreGive(xSerialMutex);
+    // 启动提示音
+    Serial.println("Playing startup sound...");
+    playStartupSound();
+    Serial.println();
+    
+    // LED 闪烁表示就绪
+    for (int i = 0; i < 3; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(100);
+        digitalWrite(LED_PIN, LOW);
+        delay(100);
     }
+    
+    Serial.println("Ready! Start playing music...\n");
 }
 
-/**
- * @brief 温度监控任务
- */
-void taskTemperatureMonitor(void* parameter) {
-    TickType_t xLastWakeTime = xTaskGetTickCount();
+void loop() {
+    static uint32_t lastHeartbeat = 0;
+    static bool isPlaying = false;
+    static int currentNote = 0;
     
-    while (1) {
-        // 读取温度
-        float temp = tempSensor1->readTemperature();
+    // 心跳指示（每10秒）
+    if (!isPlaying && (millis() - lastHeartbeat > 10000)) {
+        lastHeartbeat = millis();
+        digitalWrite(LED_PIN, HIGH);
+        delay(30);
+        digitalWrite(LED_PIN, LOW);
+    }
+    
+    // 处理串口按键
+    if (Serial.available()) {
+        char key = Serial.read();
         
-        if (!isnan(temp)) {
-            // 更新共享数据
-            if (xSemaphoreTake(xTempMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                sysState.currentTemp = temp;
-                xSemaphoreGive(xTempMutex);
-            }
-            
-            // 安全检查
-            if (temp >= TEMP_EMERGENCY_STOP) {
-                sysState.emergencyStop = true;
-                heatingCtrl->emergencyStop();
+        // 转换为大写
+        if (key >= 'a' && key <= 'z') {
+            key = key - 32;
+        }
+        
+        int frequency = 0;
+        const char* noteName = "";
+        int noteDuration = 300; // 默认音符时长
+        
+        // 按键映射到音符
+        switch (key) {
+            case 'A':
+                frequency = NOTE_C4;
+                noteName = "Do (C4)";
+                break;
+            case 'S':
+                frequency = NOTE_D4;
+                noteName = "Re (D4)";
+                break;
+            case 'D':
+                frequency = NOTE_E4;
+                noteName = "Mi (E4)";
+                break;
+            case 'F':
+                frequency = NOTE_F4;
+                noteName = "Fa (F4)";
+                break;
+            case 'G':
+                frequency = NOTE_G4;
+                noteName = "Sol (G4)";
+                break;
+            case 'H':
+                frequency = NOTE_A4;
+                noteName = "La (A4)";
+                break;
+            case 'J':
+                frequency = NOTE_B4;
+                noteName = "Si (B4)";
+                break;
+            case 'K':
+                frequency = NOTE_C5;
+                noteName = "Do' (C5)";
+                break;
+            case ' ':
+                // 空格键停止发声
+                buzzer->noTone();
+                digitalWrite(LED_PIN, LOW);
+                isPlaying = false;
+                Serial.println("[Stop]");
+                break;
+            case '0':
+                // 播放音阶
+                Serial.println("\n[Playing Scale: Do Re Mi Fa Sol La Si Do]\n");
+                playMelody();
+                Serial.println();
+                break;
+            case '9':
+                // 播放示例曲子
+                Serial.println("\n[Playing Demo Song]\n");
+                playStartupSound();
+                delay(500);
+                playMelody();
+                Serial.println();
+                break;
+            case 'Q':
+                // 显示所有命令
+                Serial.println("\n=== ALL COMMANDS ===");
+                Serial.println("Keyboard Mode:");
+                Serial.println("  A,S,D,F,G,H,J,K - Play notes");
+                Serial.println("  Space - Stop");
+                Serial.println("  0 - Play scale");
+                Serial.println("  9 - Demo song");
+                Serial.println("\nTest Commands:");
+                Serial.println("  1 - Short beep");
+                Serial.println("  2 - Warning");
+                Serial.println("  3 - Error alarm");
+                Serial.println("  T - Test mode (sweep)");
+                Serial.println("====================\n");
+                break;
+            case '1':
+                Serial.println("[Beep]");
+                buzzer->beep();
+                break;
+            case '2':
+                Serial.println("[Warning]");
+                buzzer->warning();
+                break;
+            case '3':
+                Serial.println("[Error]");
                 buzzer->error();
-                safePrint("[紧急] 温度过高！%.2f°C\n", temp);
-            }
-        } else {
-            safePrint("[错误] 温度读取失败\n");
-        }
-        
-        // 周期性休眠
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(TEMP_SAMPLE_PERIOD_MS));
-    }
-}
-
-/**
- * @brief 压力监控任务
- */
-void taskPressureMonitor(void* parameter) {
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    
-    while (1) {
-        // 读取压力
-        float pressure = pressureSensor->readPressure();
-        
-        if (!isnan(pressure)) {
-            // 更新共享数据
-            if (xSemaphoreTake(xPressureMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                sysState.currentPressure = pressure;
-                xSemaphoreGive(xPressureMutex);
-            }
-            
-            // 简单的压力控制（可改进为PID）
-            if (sysState.pumpEnabled) {
-                float error = sysState.targetPressure - pressure;
-                
-                if (error < -0.5f) {
-                    // 压力太高（负压太小），增加泵速
-                    pumpCtrl->setSpeed(80);
-                } else if (error > 0.5f) {
-                    // 压力太低（负压太大），减小泵速
-                    pumpCtrl->setSpeed(40);
-                } else {
-                    // 维持当前压力
-                    pumpCtrl->setSpeed(60);
+                break;
+            case 'T':
+                // 频率扫描测试
+                Serial.println("\n[Frequency Sweep Test]");
+                for (int freq = 200; freq <= 1000; freq += 100) {
+                    Serial.printf("  %d Hz\n", freq);
+                    digitalWrite(LED_PIN, HIGH);
+                    buzzer->tone(freq, 150);
+                    delay(200);
+                    digitalWrite(LED_PIN, LOW);
                 }
-            }
+                Serial.println();
+                break;
+            case '\n':
+            case '\r':
+                // 忽略换行符
+                break;
+            default:
+                // 其他按键提示
+                if (key >= 33 && key <= 126) {
+                    Serial.printf("[Key '%c' - Not mapped]\n", key);
+                }
+                break;
         }
         
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(PRESSURE_SAMPLE_PERIOD_MS));
+        // 如果是有效音符，播放声音
+        if (frequency > 0) {
+            Serial.printf("♪ %s - %d Hz\n", noteName, frequency);
+            digitalWrite(LED_PIN, HIGH);
+            buzzer->tone(frequency, noteDuration);
+            isPlaying = true;
+            
+            // 等待音符播放完成
+            delay(noteDuration);
+            buzzer->noTone();
+            digitalWrite(LED_PIN, LOW);
+            isPlaying = false;
+        }
     }
-}
-
-/**
- * @brief 加热控制任务
- */
-void taskHeatingControl(void* parameter) {
-    TickType_t xLastWakeTime = xTaskGetTickCount();
     
-    while (1) {
-        if (sysState.heatingEnabled && !sysState.emergencyStop) {
-            float temp;
-            
-            // 读取当前温度
-            if (xSemaphoreTake(xTempMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                temp = sysState.currentTemp;
-                xSemaphoreGive(xTempMutex);
-            } else {
-                temp = 0.0f;
-            }
-            
-            // 执行PID控制
-            uint8_t output = heatingCtrl->update(temp);
-            
-            // 定期打印控制状态
-            static uint32_t lastPrintTime = 0;
-            if (millis() - lastPrintTime > 5000) {
-                safePrint("[加热] 当前: %.1f°C, 目标: %.1f°C, 功率: %.0f%%\n",
-                         temp, sysState.targetTemp, heatingCtrl->getPowerPercent());
-                lastPrintTime = millis();
-            }
-        }
-        
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(CONTROL_UPDATE_PERIOD_MS));
+    delay(10);
+}
+
+/**
+ * @brief 播放简单旋律（Do Re Mi Fa Sol La Si Do）
+ */
+void playMelody() {
+    int melody[] = {NOTE_C4, NOTE_D4, NOTE_E4, NOTE_F4, NOTE_G4, NOTE_A4, NOTE_B4, NOTE_C5};
+    int noteDuration = 300;
+    
+    for (int i = 0; i < 8; i++) {
+        Serial.printf("   Note %d: %d Hz\n", i+1, melody[i]);
+        digitalWrite(LED_PIN, HIGH);
+        buzzer->tone(melody[i], noteDuration);
+        delay(noteDuration + 50);
+        digitalWrite(LED_PIN, LOW);
+        delay(50);
     }
 }
 
 /**
- * @brief 用户界面任务（按键处理）
+ * @brief 播放启动音效
  */
-void taskUserInterface(void* parameter) {
-    while (1) {
-        // 更新按键状态
-        btnPower->update();
-        btnUp->update();
-        btnDown->update();
-        
-        // 电源/模式按键
-        if (btnPower->wasPressed()) {
-            sysState.heatingEnabled = !sysState.heatingEnabled;
-            sysState.pumpEnabled = !sysState.pumpEnabled;
-            
-            if (sysState.heatingEnabled) {
-                heatingCtrl->enable();
-                pumpCtrl->start();
-                pumpCtrl->setSpeed(60);
-                buzzer->beep();
-                safePrint("[系统] 加热和泵已启动\n");
-            } else {
-                heatingCtrl->disable();
-                pumpCtrl->stop();
-                buzzer->beep();
-                safePrint("[系统] 加热和泵已停止\n");
-            }
-        }
-        
-        // 增加温度
-        if (btnUp->wasPressed()) {
-            sysState.targetTemp += 1.0f;
-            if (sysState.targetTemp > TEMP_MAX_LIMIT) {
-                sysState.targetTemp = TEMP_MAX_LIMIT;
-            }
-            heatingCtrl->setTargetTemperature(sysState.targetTemp);
-            buzzer->beep();
-            safePrint("[设置] 目标温度: %.1f°C\n", sysState.targetTemp);
-        }
-        
-        // 减少温度
-        if (btnDown->wasPressed()) {
-            sysState.targetTemp -= 1.0f;
-            if (sysState.targetTemp < TEMP_MIN_LIMIT) {
-                sysState.targetTemp = TEMP_MIN_LIMIT;
-            }
-            heatingCtrl->setTargetTemperature(sysState.targetTemp);
-            buzzer->beep();
-            safePrint("[设置] 目标温度: %.1f°C\n", sysState.targetTemp);
-        }
-        
-        // 长按电源键 - 紧急停止
-        if (btnPower->isLongPressed(3000)) {
-            sysState.emergencyStop = true;
-            heatingCtrl->emergencyStop();
-            pumpCtrl->stop();
-            buzzer->warning();
-            safePrint("[系统] 紧急停止触发\n");
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
-        
-        // 定期打印系统状态
-        static uint32_t lastStatusTime = 0;
-        if (millis() - lastStatusTime > 10000) {
-            safePrint("\n=== 系统状态 ===\n");
-            safePrint("温度: %.1f°C (目标: %.1f°C)\n", sysState.currentTemp, sysState.targetTemp);
-            safePrint("压力: %.2f kPa (目标: %.2f kPa)\n", sysState.currentPressure, sysState.targetPressure);
-            safePrint("加热: %s, 泵: %s\n", 
-                     sysState.heatingEnabled ? "ON" : "OFF",
-                     sysState.pumpEnabled ? "ON" : "OFF");
-            safePrint("================\n\n");
-            lastStatusTime = millis();
-        }
-        
-        vTaskDelay(pdMS_TO_TICKS(50)); // 按键扫描周期
+void playStartupSound() {
+    // 三音上升音阶
+    int notes[] = {NOTE_C4, NOTE_E4, NOTE_G4};
+    int durations[] = {100, 100, 200};
+    
+    for (int i = 0; i < 3; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        buzzer->tone(notes[i], durations[i]);
+        delay(durations[i] + 50);
+        digitalWrite(LED_PIN, LOW);
+        delay(50);
     }
 }
