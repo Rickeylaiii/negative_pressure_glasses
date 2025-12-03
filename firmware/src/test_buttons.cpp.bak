@@ -1,0 +1,275 @@
+/**
+ * @file test_buttons.cpp
+ * @brief 测试按键功能
+ * 
+ * 功能：
+ * - 测试 STOP、UP、DOWN 三个按键
+ * - 显示按键状态（按下、松开、长按）
+ * - LED 指示按键状态
+ * - 模拟档位调节
+ * 
+ * 按键定义：
+ * - STOP (GPIO10): 急停按键，低电平触发
+ * - UP (GPIO20): 增加档位
+ * - DOWN (GPIO21): 减少档位
+ * 
+ * 使用方法：
+ * 1. 重命名此文件为 main.cpp
+ * 2. 备份原 main.cpp
+ * 3. 编译上传
+ */
+
+#include <Arduino.h>
+#include "config.h"
+#include "Button.h"
+
+// LED 引脚
+#define LED_PIN 8
+
+// 按键对象
+Button* btnStop;
+Button* btnUp;
+Button* btnDown;
+
+// 系统状态
+uint8_t currentGear = 5;  // 当前档位 (1-10)
+bool systemStopped = false;  // 系统停止状态
+
+void setup() {
+    // 初始化串口
+    Serial.begin(115200);
+    
+    uint32_t startTime = millis();
+    while (!Serial && (millis() - startTime < 3000)) {
+        delay(10);
+    }
+    delay(500);
+    
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
+    
+    Serial.println("\n\n========================================");
+    Serial.println("按键功能测试");
+    Serial.println("========================================");
+    Serial.printf("芯片: %s @ %dMHz\n", ESP.getChipModel(), ESP.getCpuFreqMHz());
+    Serial.println("========================================\n");
+    
+    // 显示按键配置
+    Serial.println("按键配置:");
+    Serial.printf("  STOP: GPIO%d (低电平触发急停)\n", BUTTON_STOP_PIN);
+    Serial.printf("  UP:   GPIO%d (增加档位)\n", BUTTON_UP_PIN);
+    Serial.printf("  DOWN: GPIO%d (减少档位)\n", BUTTON_DOWN_PIN);
+    Serial.println();
+    
+    // 初始化按键
+    btnStop = new Button(BUTTON_STOP_PIN);
+    btnUp = new Button(BUTTON_UP_PIN);
+    btnDown = new Button(BUTTON_DOWN_PIN);
+    
+    btnStop->begin();
+    btnUp->begin();
+    btnDown->begin();
+    
+    Serial.println("✓ 按键初始化完成");
+    Serial.println();
+    
+    Serial.println("测试说明:");
+    Serial.println("  - 按下按键会实时显示状态");
+    Serial.println("  - STOP 按键会触发急停");
+    Serial.println("  - UP/DOWN 按键调节档位 (1-10)");
+    Serial.println("  - LED 指示系统状态");
+    Serial.println();
+    
+    Serial.printf("初始档位: %d/10 (%.0f%%)\n", currentGear, currentGear * 10.0f);
+    Serial.println("\n开始监听按键...\n");
+    
+    // LED 快闪表示就绪
+    for (int i = 0; i < 3; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(100);
+        digitalWrite(LED_PIN, LOW);
+        delay(100);
+    }
+}
+
+void loop() {
+    static uint32_t lastStatusPrint = 0;
+    
+    // 更新按键状态
+    btnStop->update();
+    btnUp->update();
+    btnDown->update();
+    
+    // ========== STOP 按键处理 ==========
+    if (btnStop->isPressed()) {
+        if (!systemStopped) {
+            systemStopped = true;
+            Serial.println("\n!!! 急停触发 !!!");
+            Serial.println("系统已停止");
+            Serial.println("松开 STOP 按键恢复运行\n");
+            
+            // LED 快闪表示急停
+            digitalWrite(LED_PIN, HIGH);
+        }
+    } else {
+        if (systemStopped) {
+            systemStopped = false;
+            Serial.println("\n*** 急停解除 ***");
+            Serial.println("系统恢复运行\n");
+            digitalWrite(LED_PIN, LOW);
+        }
+    }
+    
+    // 如果系统停止，LED 闪烁
+    if (systemStopped) {
+        static uint32_t lastBlink = 0;
+        if (millis() - lastBlink > 200) {
+            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+            lastBlink = millis();
+        }
+    } else {
+        // 正常运行，LED 慢闪
+        static uint32_t lastBlink = 0;
+        if (millis() - lastBlink > 1000) {
+            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+            lastBlink = millis();
+        }
+    }
+    
+    // ========== UP 按键处理 ==========
+    if (btnUp->wasPressed()) {
+        Serial.printf("[%lu] UP 按键按下\n", millis());
+        
+        if (!systemStopped) {
+            if (currentGear < 10) {
+                currentGear++;
+                Serial.printf("  → 档位增加: %d/10 (%.0f%%)\n", 
+                             currentGear, currentGear * 10.0f);
+                
+                // LED 快闪表示档位变化
+                for (int i = 0; i < 2; i++) {
+                    digitalWrite(LED_PIN, HIGH);
+                    delay(50);
+                    digitalWrite(LED_PIN, LOW);
+                    delay(50);
+                }
+            } else {
+                Serial.println("  → 已达最大档位 (10/10)");
+                // LED 长闪表示到达上限
+                digitalWrite(LED_PIN, HIGH);
+                delay(300);
+                digitalWrite(LED_PIN, LOW);
+            }
+        } else {
+            Serial.println("  → 系统已停止，无法调节档位");
+        }
+        Serial.println();
+    }
+    
+    if (btnUp->isLongPress()) {
+        static bool longPressReported = false;
+        if (!longPressReported) {
+            Serial.printf("[%lu] UP 按键长按\n\n", millis());
+            longPressReported = true;
+        }
+    } else {
+        static bool longPressReported = false;
+        longPressReported = false;
+    }
+    
+    // ========== DOWN 按键处理 ==========
+    if (btnDown->wasPressed()) {
+        Serial.printf("[%lu] DOWN 按键按下\n", millis());
+        
+        if (!systemStopped) {
+            if (currentGear > 1) {
+                currentGear--;
+                Serial.printf("  → 档位减少: %d/10 (%.0f%%)\n", 
+                             currentGear, currentGear * 10.0f);
+                
+                // LED 快闪表示档位变化
+                for (int i = 0; i < 2; i++) {
+                    digitalWrite(LED_PIN, HIGH);
+                    delay(50);
+                    digitalWrite(LED_PIN, LOW);
+                    delay(50);
+                }
+            } else {
+                Serial.println("  → 已达最小档位 (1/10)");
+                // LED 长闪表示到达下限
+                digitalWrite(LED_PIN, HIGH);
+                delay(300);
+                digitalWrite(LED_PIN, LOW);
+            }
+        } else {
+            Serial.println("  → 系统已停止，无法调节档位");
+        }
+        Serial.println();
+    }
+    
+    if (btnDown->isLongPress()) {
+        static bool longPressReported = false;
+        if (!longPressReported) {
+            Serial.printf("[%lu] DOWN 按键长按\n\n", millis());
+            longPressReported = true;
+        }
+    } else {
+        static bool longPressReported = false;
+        longPressReported = false;
+    }
+    
+    // ========== 定期状态打印 ==========
+    if (millis() - lastStatusPrint > 10000) {
+        lastStatusPrint = millis();
+        
+        Serial.println("\n=== 当前状态 ===");
+        Serial.printf("运行时间: %lu 秒\n", millis()/1000);
+        Serial.printf("系统状态: %s\n", systemStopped ? "已停止 (急停)" : "运行中");
+        Serial.printf("当前档位: %d/10 (%.0f%%)\n", currentGear, currentGear * 10.0f);
+        Serial.printf("STOP 按键: %s\n", btnStop->isPressed() ? "按下" : "松开");
+        Serial.printf("UP 按键: %s\n", btnUp->isPressed() ? "按下" : "松开");
+        Serial.printf("DOWN 按键: %s\n", btnDown->isPressed() ? "按下" : "松开");
+        Serial.printf("可用内存: %d KB\n", ESP.getFreeHeap()/1024);
+        Serial.println("================\n");
+    }
+    
+    // 处理串口命令
+    if (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+        cmd.toLowerCase();
+        
+        if (cmd.length() > 0) {
+            if (cmd == "s" || cmd == "status") {
+                // 显示状态
+                Serial.println("\n=== 即时状态 ===");
+                Serial.printf("系统状态: %s\n", systemStopped ? "已停止" : "运行中");
+                Serial.printf("当前档位: %d/10\n", currentGear);
+                Serial.printf("STOP: %s\n", btnStop->isPressed() ? "按下" : "松开");
+                Serial.printf("UP: %s\n", btnUp->isPressed() ? "按下" : "松开");
+                Serial.printf("DOWN: %s\n", btnDown->isPressed() ? "按下" : "松开");
+                Serial.println("================\n");
+            }
+            else if (cmd.startsWith("g")) {
+                // 设置档位
+                int gear = cmd.substring(1).toInt();
+                if (gear >= 1 && gear <= 10) {
+                    currentGear = gear;
+                    Serial.printf("\n✓ 档位设置为: %d/10\n\n", currentGear);
+                } else {
+                    Serial.println("\n✗ 档位范围: 1-10\n");
+                }
+            }
+            else if (cmd == "h" || cmd == "help") {
+                // 帮助
+                Serial.println("\n=== 命令帮助 ===");
+                Serial.println("s - 显示当前状态");
+                Serial.println("g<档位> - 设置档位 (如: g5)");
+                Serial.println("h - 显示此帮助");
+                Serial.println("================\n");
+            }
+        }
+    }
+    
+    delay(10);  // 按键扫描延迟
+}

@@ -26,7 +26,7 @@ __pycache__/
 
 # Backup files
 *_backup.*
-*.bak
+
 
 # Log files
 *.log

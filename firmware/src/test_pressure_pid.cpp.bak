@@ -1,0 +1,276 @@
+/**
+ * @file test_pressure_pid.cpp
+ * @brief 测试负压泵 PID 控制
+ * 
+ * 功能：
+ * - 读取 XGZP6897D 气压传感器
+ * - 简单的负压控制（可扩展为完整PID）
+ * - 实时显示气压、泵速度
+ * - 通过串口命令调整目标压力
+ * 
+ * 串口命令：
+ * - p<压力>: 设置目标压力，如 "p15" 设置为-15mmHg
+ * - s<速度>: 设置泵速度 0-100，如 "s60"
+ * - t: 打印当前状态
+ * - on: 启动泵
+ * - off: 停止泵
+ * 
+ * 使用方法：
+ * 1. 重命名此文件为 main.cpp
+ * 2. 备份原 main.cpp
+ * 3. 编译上传
+ */
+
+#include <Arduino.h>
+#include "config.h"
+#include "PressureSensor.h"
+#include "PumpController.h"
+
+// LED 引脚
+#define LED_PIN 8
+
+// 对象
+PressureSensor* pressureSensor;
+PumpController* pumpCtrl;
+
+// 控制参数
+float targetPressure = -15.0f;  // 目标负压 (mmHg)
+bool pumpEnabled = false;
+uint8_t manualSpeed = 0;  // 手动速度控制
+
+void setup() {
+    // 初始化串口
+    Serial.begin(115200);
+    
+    uint32_t startTime = millis();
+    while (!Serial && (millis() - startTime < 3000)) {
+        delay(10);
+    }
+    delay(500);
+    
+    pinMode(LED_PIN, OUTPUT);
+    
+    Serial.println("\n\n========================================");
+    Serial.println("负压泵 PID 控制测试");
+    Serial.println("========================================");
+    Serial.printf("芯片: %s @ %dMHz\n", ESP.getChipModel(), ESP.getCpuFreqMHz());
+    Serial.println("========================================\n");
+    
+    // 初始化压力传感器
+    Serial.println("初始化 XGZP6897D...");
+    pressureSensor = new PressureSensor(PRESSURE_SDA_PIN, PRESSURE_SCL_PIN);
+    
+    if (!pressureSensor->begin()) {
+        Serial.println("✗ XGZP6897D 初始化失败！");
+        while (1) {
+            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+            delay(100);
+        }
+    }
+    Serial.println("✓ XGZP6897D 初始化成功");
+    
+    // 初始化负压泵控制器
+    Serial.println("初始化负压泵控制器...");
+    pumpCtrl = new PumpController(PUMP_PWM_PIN, PWM_CHANNEL_PUMP);
+    pumpCtrl->begin();
+    
+    Serial.println("✓ 负压泵控制器初始化成功");
+    Serial.println();
+    
+    Serial.printf("目标负压: %.1f mmHg\n", targetPressure);
+    Serial.println("\n串口命令:");
+    Serial.println("  p<压力> - 设置目标负压 (如: p20 表示-20mmHg)");
+    Serial.println("  s<速度> - 手动设置泵速度 0-100 (如: s60)");
+    Serial.println("  on - 启动泵");
+    Serial.println("  off - 停止泵");
+    Serial.println("  t - 打印状态");
+    Serial.println("  auto - 自动控制模式");
+    Serial.println("  manual - 手动控制模式");
+    Serial.println("\n! 注意：负压用正数表示，实际为负值\n");
+    
+    digitalWrite(LED_PIN, HIGH);
+    delay(500);
+    digitalWrite(LED_PIN, LOW);
+}
+
+void loop() {
+    static uint32_t lastUpdate = 0;
+    static uint32_t updateCount = 0;
+    static bool autoMode = true;  // 自动控制模式
+    
+    // 每秒更新一次
+    if (millis() - lastUpdate >= 1000) {
+        lastUpdate = millis();
+        updateCount++;
+        
+        // 读取气压
+        float currentPressure = pressureSensor->readPressure();
+        
+        if (!isnan(currentPressure)) {
+            
+            if (pumpEnabled && autoMode) {
+                // 自动控制模式
+                // 简单的压力控制算法（可改进为完整PID）
+                float error = targetPressure - (-currentPressure);  // 注意：负压转正数比较
+                
+                uint8_t speed;
+                if (error > 5.0f) {
+                    // 实际压力远小于目标，需要强力抽气
+                    speed = 90;
+                } else if (error > 2.0f) {
+                    // 实际压力小于目标，增加抽气
+                    speed = 70;
+                } else if (error > -2.0f) {
+                    // 接近目标，维持
+                    speed = 50;
+                } else if (error > -5.0f) {
+                    // 实际压力大于目标，减小抽气
+                    speed = 30;
+                } else {
+                    // 实际压力远大于目标，停止抽气
+                    speed = 0;
+                }
+                
+                pumpCtrl->setSpeed(speed);
+                
+                // LED 指示（接近目标时常亮）
+                if (abs(error) < 2.0f) {
+                    digitalWrite(LED_PIN, HIGH);
+                } else {
+                    digitalWrite(LED_PIN, (millis() / 500) % 2);
+                }
+                
+                // 打印状态
+                Serial.printf("[%lu] ", millis()/1000);
+                Serial.printf("当前: %.2f mmHg | ", currentPressure);
+                Serial.printf("目标: %.1f mmHg | ", targetPressure);
+                Serial.printf("误差: %+.2f mmHg | ", error);
+                Serial.printf("泵速: %3d%% [自动]", speed);
+                
+                if (abs(error) < 2.0f) {
+                    Serial.print(" [稳定]");
+                } else if (error > 0) {
+                    Serial.print(" [抽气中]");
+                } else {
+                    Serial.print(" [泄压中]");
+                }
+                
+            } else if (pumpEnabled && !autoMode) {
+                // 手动控制模式
+                digitalWrite(LED_PIN, (millis() / 1000) % 2);
+                
+                Serial.printf("[%lu] ", millis()/1000);
+                Serial.printf("当前: %.2f mmHg | ", currentPressure);
+                Serial.printf("泵速: %3d%% [手动]", manualSpeed);
+                
+            } else {
+                // 泵停止
+                digitalWrite(LED_PIN, LOW);
+                
+                Serial.printf("[%lu] ", millis()/1000);
+                Serial.printf("当前: %.2f mmHg | ", currentPressure);
+                Serial.print("泵: 停止");
+            }
+            
+            Serial.println();
+            
+            // 每10次输出详细信息
+            if (updateCount % 10 == 0) {
+                Serial.println("\n--- 详细状态 ---");
+                Serial.printf("运行时间: %lu 秒\n", millis()/1000);
+                Serial.printf("当前压力: %.2f mmHg\n", currentPressure);
+                Serial.printf("目标压力: %.1f mmHg\n", targetPressure);
+                Serial.printf("压力误差: %+.2f mmHg\n", targetPressure - (-currentPressure));
+                Serial.printf("泵状态: %s\n", pumpEnabled ? "运行" : "停止");
+                Serial.printf("控制模式: %s\n", autoMode ? "自动" : "手动");
+                if (pumpEnabled) {
+                    Serial.printf("泵速度: %d%%\n", pumpCtrl->getCurrentSpeed());
+                }
+                Serial.printf("可用内存: %d KB\n", ESP.getFreeHeap()/1024);
+                Serial.println("----------------\n");
+            }
+            
+        } else {
+            Serial.println("[错误] 压力读取失败！");
+            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+        }
+    }
+    
+    // 处理串口命令
+    if (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+        cmd.toLowerCase();
+        
+        if (cmd.length() > 0) {
+            if (cmd.startsWith("p")) {
+                // 设置目标压力
+                float newTarget = cmd.substring(1).toFloat();
+                if (newTarget >= 0.0f && newTarget <= 50.0f) {
+                    targetPressure = -newTarget;  // 转为负值
+                    Serial.printf("\n✓ 目标压力设置为: %.1f mmHg\n\n", targetPressure);
+                } else {
+                    Serial.println("\n✗ 压力范围: 0-50 mmHg\n");
+                }
+            }
+            else if (cmd.startsWith("s")) {
+                // 设置手动速度
+                int speed = cmd.substring(1).toInt();
+                if (speed >= 0 && speed <= 100) {
+                    manualSpeed = speed;
+                    if (!autoMode && pumpEnabled) {
+                        pumpCtrl->setSpeed(manualSpeed);
+                    }
+                    Serial.printf("\n✓ 手动速度设置为: %d%%\n\n", manualSpeed);
+                } else {
+                    Serial.println("\n✗ 速度范围: 0-100\n");
+                }
+            }
+            else if (cmd == "on") {
+                // 启动泵
+                pumpEnabled = true;
+                pumpCtrl->start();
+                if (!autoMode) {
+                    pumpCtrl->setSpeed(manualSpeed);
+                }
+                Serial.println("\n✓ 泵已启动\n");
+            }
+            else if (cmd == "off") {
+                // 停止泵
+                pumpEnabled = false;
+                pumpCtrl->stop();
+                Serial.println("\n✓ 泵已停止\n");
+            }
+            else if (cmd == "auto") {
+                // 自动控制模式
+                autoMode = true;
+                Serial.println("\n✓ 切换到自动控制模式\n");
+            }
+            else if (cmd == "manual") {
+                // 手动控制模式
+                autoMode = false;
+                if (pumpEnabled) {
+                    pumpCtrl->setSpeed(manualSpeed);
+                }
+                Serial.println("\n✓ 切换到手动控制模式\n");
+            }
+            else if (cmd == "t") {
+                // 打印状态
+                Serial.println("\n=== 当前状态 ===");
+                float currentPressure = pressureSensor->readPressure();
+                Serial.printf("当前压力: %.2f mmHg\n", currentPressure);
+                Serial.printf("目标压力: %.1f mmHg\n", targetPressure);
+                Serial.printf("泵状态: %s\n", pumpEnabled ? "运行" : "停止");
+                Serial.printf("控制模式: %s\n", autoMode ? "自动" : "手动");
+                if (pumpEnabled) {
+                    Serial.printf("当前速度: %d%%\n", pumpCtrl->getCurrentSpeed());
+                }
+                Serial.printf("运行时间: %lu 秒\n", millis()/1000);
+                Serial.println("================\n");
+            }
+            else {
+                Serial.println("\n✗ 未知命令，输入 h 查看帮助\n");
+            }
+        }
+    }
+}

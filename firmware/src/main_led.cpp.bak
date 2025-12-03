@@ -1,0 +1,22 @@
+/**
+ * @file main.cpp
+ * @brief Minimal LED Blink Test - Inverted Logic
+ */
+
+#include <Arduino.h>
+
+#define LED_PIN 8
+
+void setup() {
+    // 初始化LED
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, HIGH);  
+}
+
+void loop() {
+    // 尝试反转逻辑 - 低电平点亮
+    digitalWrite(LED_PIN, LOW);   // 点亮
+    delay(500);
+    digitalWrite(LED_PIN, HIGH);  // 熄灭
+    delay(500);
+}

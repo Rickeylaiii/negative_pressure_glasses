@@ -1,0 +1,286 @@
+/**
+ * @file test_CPS610DSD003DH01.cpp
+ * @brief 测试 CPS610DSD003DH01 气压传感器
+ * 
+ * 传感器参数:
+ * - I2C地址: 0x7F
+ * - 量程: -3.0 ~ +3.0 kPa
+ * - 命令寄存器: 0x30
+ * - 数据寄存器: 0x06-0x08 (24位)
+ * 
+ * 功能：
+ * - 初始化 CPS610DSD003DH01 (I2C)
+ * - 每秒读取一次气压
+ * - 显示气压值（kPa 和 mmHg）
+ * - LED 指示读取状态
+ * 
+ * 使用方法：
+ * 1. 重命名此文件为 main.cpp
+ * 2. 备份原 main.cpp
+ * 3. 编译上传
+ */
+
+#include <Arduino.h>
+#include "config.h"
+#include "PressureSensor.h"
+
+// LED 引脚
+#define LED_PIN 3
+
+// 压力传感器对象
+PressureSensor* pressureSensor;
+
+void setup() {
+    // 初始化串口
+    Serial.begin(115200);
+    
+    // 等待串口连接
+    uint32_t startTime = millis();
+    while (!Serial && (millis() - startTime < 3000)) {
+        delay(10);
+    }
+    delay(500);
+    
+    // 初始化 LED
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
+    
+    Serial.println("\n\n========================================");
+    Serial.println("CPS610DSD003DH01 Pressure Sensor Test");
+    Serial.println("========================================");
+    Serial.printf("Chip: %s @ %dMHz\n", ESP.getChipModel(), ESP.getCpuFreqMHz());
+    Serial.printf("Free Memory: %d KB\n", ESP.getFreeHeap()/1024);
+    Serial.println("========================================\n");
+    
+    // 显示引脚配置
+    Serial.println("I2C Pin Configuration:");
+    Serial.printf("  SDA: GPIO%d\n", PRESSURE_SDA_PIN);
+    Serial.printf("  SCL: GPIO%d\n", PRESSURE_SCL_PIN);
+    Serial.printf("  Address: 0x7F (CPS610DSD003DH01)\n");
+    Serial.println();
+    
+    Serial.println("Sensor Specifications:");
+    Serial.println("  Model: CPS610DSD003DH01");
+    Serial.println("  Range: -3.0 ~ +3.0 kPa");
+    Serial.println("  Resolution: 24-bit");
+    Serial.println();
+    
+    // I2C扫描
+    Serial.println("Scanning I2C bus...");
+    Wire.begin(PRESSURE_SDA_PIN, PRESSURE_SCL_PIN);
+    Wire.setClock(100000);
+    
+    int devicesFound = 0;
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        Wire.beginTransmission(addr);
+        uint8_t error = Wire.endTransmission();
+        
+        if (error == 0) {
+            Serial.printf("  Found device at 0x%02X", addr);
+            if (addr == 0x7F) {
+                Serial.print(" <- CPS610DSD003DH01 (Expected)");
+            } else if (addr == 0x6D) {
+                Serial.print(" (Could be XGZP6897D)");
+            }
+            Serial.println();
+            devicesFound++;
+        }
+        delay(1);
+    }
+    
+    if (devicesFound == 0) {
+        Serial.println("  X No I2C devices found!");
+        Serial.println();
+        Serial.println("Critical Check:");
+        Serial.println("  1. Is sensor powered? (Check VCC -> 3.3V)");
+        Serial.println("  2. Are SDA/SCL connected correctly?");
+        Serial.println("  3. Are pull-up resistors present? (Usually 4.7K)");
+        Serial.println("  4. Try swapping SDA and SCL pins");
+        Serial.println();
+        
+        while (1) {
+            digitalWrite(LED_PIN, HIGH);
+            delay(100);
+            digitalWrite(LED_PIN, LOW);
+            delay(100);
+        }
+    } else {
+        Serial.printf("  Total devices found: %d\n", devicesFound);
+    }
+    Serial.println();
+    
+    // 创建并初始化压力传感器 (I2C地址0x7F已在类中默认)
+    pressureSensor = new PressureSensor(PRESSURE_SDA_PIN, PRESSURE_SCL_PIN);
+    
+    if (pressureSensor->begin()) {
+        Serial.println("OK CPS610DSD003DH01 initialization successful!");
+        digitalWrite(LED_PIN, HIGH);
+        delay(500);
+        digitalWrite(LED_PIN, LOW);
+    } else {
+        Serial.println("X CPS610DSD003DH01 initialization failed!");
+        Serial.println();
+        Serial.println("Troubleshooting:");
+        Serial.println("  1. Check I2C wiring:");
+        Serial.printf("     SDA -> GPIO%d\n", PRESSURE_SDA_PIN);
+        Serial.printf("     SCL -> GPIO%d\n", PRESSURE_SCL_PIN);
+        Serial.println("     VCC -> 3.3V");
+        Serial.println("     GND -> GND");
+        Serial.println("  2. Verify sensor power supply");
+        Serial.println("  3. Confirm I2C address is 0x7F");
+        Serial.println("  4. Check for I2C pull-up resistors");
+        Serial.println();
+        
+        while (1) {
+            // LED 快闪表示错误
+            digitalWrite(LED_PIN, HIGH);
+            delay(100);
+            digitalWrite(LED_PIN, LOW);
+            delay(100);
+        }
+    }
+    
+    Serial.println("\nPressure Unit Conversion:");
+    Serial.println("  1 kPa = 7.5006 mmHg");
+    Serial.println("  1 mmHg = 0.1333 kPa");
+    Serial.println("  Negative: Vacuum/suction");
+    Serial.println();
+    
+    Serial.println("Serial Commands:");
+    Serial.println("  r - Reset statistics");
+    Serial.println("  s - Show statistics");
+    Serial.println("  c - Calibrate zero point");
+    Serial.println("  h - Show help");
+    Serial.println();
+    
+    Serial.println("Starting pressure reading...\n");
+}
+
+void loop() {
+    static uint32_t lastRead = 0;
+    static uint32_t readCount = 0;
+    static float minPressure = 999.0f;
+    static float maxPressure = -999.0f;
+    static float sumPressure = 0.0f;
+    
+    if (millis() - lastRead >= 1000) {
+        lastRead = millis();
+        readCount++;
+        
+        // LED 闪烁表示正在读取
+        digitalWrite(LED_PIN, HIGH);
+        
+        // 读取气压 (kPa)
+        float pressureKPa = pressureSensor->readPressure();
+        
+        Serial.printf("[%lu] Reading #%lu: ", millis()/1000, readCount);
+        
+        if (!isnan(pressureKPa)) {
+            // 气压读取成功
+            
+            // 更新统计数据
+            if (pressureKPa < minPressure) minPressure = pressureKPa;
+            if (pressureKPa > maxPressure) maxPressure = pressureKPa;
+            sumPressure += pressureKPa;
+            float avgPressure = sumPressure / readCount;
+            
+            // 转换为 mmHg
+            float pressureMmHg = pressureKPa * 7.5006f;
+            
+            Serial.printf("%.3f kPa (%.2f mmHg)", pressureKPa, pressureMmHg);
+            
+            // 压力范围判断
+            if (pressureKPa < -1.0f) {
+                Serial.print(" [VACUUM]");
+            } else if (pressureKPa < -0.1f) {
+                Serial.print(" [Slight vacuum]");
+            } else if (pressureKPa >= -0.1f && pressureKPa <= 0.1f) {
+                Serial.print(" [Atmospheric]");
+            } else if (pressureKPa > 0.1f && pressureKPa <= 1.0f) {
+                Serial.print(" [Slight pressure]");
+            } else {
+                Serial.print(" [PRESSURE]");
+            }
+            
+            Serial.println();
+            
+            // 每5次读取显示统计信息
+            if (readCount % 5 == 0) {
+                Serial.println("\n--- Statistics ---");
+                Serial.printf("Min: %.3f kPa (%.2f mmHg)\n", minPressure, minPressure * 7.5006f);
+                Serial.printf("Max: %.3f kPa (%.2f mmHg)\n", maxPressure, maxPressure * 7.5006f);
+                Serial.printf("Avg: %.3f kPa (%.2f mmHg)\n", avgPressure, avgPressure * 7.5006f);
+                Serial.printf("Range: %.3f kPa\n", maxPressure - minPressure);
+                Serial.println("------------------\n");
+            }
+            
+        } else {
+            // 气压读取失败
+            Serial.println("Read failed");
+            Serial.println("  Check:");
+            Serial.println("  1. Sensor working?");
+            Serial.println("  2. I2C communication OK?");
+            Serial.println("  3. Power supply stable?");
+        }
+        
+        digitalWrite(LED_PIN, LOW);
+        
+        // 每10次读取输出系统信息
+        if (readCount % 10 == 0) {
+            Serial.println("\n=== System Info ===");
+            Serial.printf("Uptime: %lu seconds\n", millis()/1000);
+            Serial.printf("Read count: %lu\n", readCount);
+            Serial.printf("Free memory: %d KB\n", ESP.getFreeHeap()/1024);
+            Serial.println("===================\n");
+        }
+    }
+    
+    // 处理串口命令
+    if (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+        
+        if (cmd.length() > 0) {
+            char c = cmd.charAt(0);
+            
+            if (c == 'r' || c == 'R') {
+                // 重置统计
+                readCount = 0;
+                minPressure = 999.0f;
+                maxPressure = -999.0f;
+                sumPressure = 0.0f;
+                Serial.println("\nOK Statistics reset\n");
+            }
+            else if (c == 's' || c == 'S') {
+                // 显示统计
+                Serial.println("\n=== Statistics ===");
+                Serial.printf("Read count: %lu\n", readCount);
+                if (readCount > 0) {
+                    Serial.printf("Min: %.3f kPa (%.2f mmHg)\n", minPressure, minPressure * 7.5006f);
+                    Serial.printf("Max: %.3f kPa (%.2f mmHg)\n", maxPressure, maxPressure * 7.5006f);
+                    Serial.printf("Avg: %.3f kPa (%.2f mmHg)\n", sumPressure / readCount, (sumPressure / readCount) * 7.5006f);
+                    Serial.printf("Range: %.3f kPa\n", maxPressure - minPressure);
+                }
+                Serial.println("==================\n");
+            }
+            else if (c == 'c' || c == 'C') {
+                // 零点校准
+                Serial.println("\n=== Zero Calibration ===");
+                Serial.println("Make sure sensor is at atmospheric pressure");
+                Serial.println("(no pressure difference)");
+                Serial.println();
+                pressureSensor->calibrateZero();
+                Serial.println("========================\n");
+            }
+            else if (c == 'h' || c == 'H') {
+                // 帮助
+                Serial.println("\n=== Command Help ===");
+                Serial.println("r - Reset statistics");
+                Serial.println("s - Show statistics");
+                Serial.println("c - Calibrate zero point");
+                Serial.println("h - Show this help");
+                Serial.println("====================\n");
+            }
+        }
+    }
+}

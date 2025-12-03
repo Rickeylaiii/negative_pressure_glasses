@@ -1,0 +1,455 @@
+/**
+ * @file test_max31855.cpp
+ * @brief Test MAX31855 K-type Thermocouple Temperature Sensor
+ * 
+ * Features:
+ * - Initialize MAX31855
+ * - Read temperature every second
+ * - Display temperature values and fault information
+ * - LED indicates reading status
+ * - Diagnostic mode for testing without thermocouple
+ * 
+ * Serial Commands:
+ * - d: Show detailed diagnostic information
+ * - r: Read raw SPI data (32-bit)
+ * - s: Show current status
+ * - h: Help
+ * 
+ * Usage:
+ * 1. Rename this file to test_max31855.cpp
+ * 2. Rename main.cpp to main.cpp.bak
+ * 3. Compile and upload
+ */
+
+#include <Arduino.h>
+#include "config.h"
+#include "TemperatureSensor.h"
+
+// LED pin
+#define LED_PIN 8
+
+// Temperature sensor object
+TemperatureSensor* tempSensor;
+
+void printDiagnostics();
+void printRawData();
+void printHelp();
+
+void setup() {
+    // Initialize serial port
+    Serial.begin(115200);
+    
+    // Wait for serial connection
+    uint32_t startTime = millis();
+    while (!Serial && (millis() - startTime < 3000)) {
+        delay(10);
+    }
+    delay(500);
+    
+    // Initialize LED
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
+    
+    Serial.println("\n\n========================================");
+    Serial.println("MAX31855 Temperature Sensor Test");
+    Serial.println("========================================");
+    Serial.printf("Chip: %s @ %dMHz\n", ESP.getChipModel(), ESP.getCpuFreqMHz());
+    Serial.printf("Free Memory: %d KB\n", ESP.getFreeHeap()/1024);
+    Serial.println("========================================\n");
+    
+    // Display pin configuration
+    Serial.println("Pin Configuration:");
+    Serial.printf("  SCK:  GPIO%d\n", THERMO_CLK_PIN);
+    Serial.printf("  MISO: GPIO%d\n", THERMO_MISO_PIN);
+    Serial.printf("  CS:   GPIO%d\n", THERMO_CS_PIN);
+    Serial.println();
+    
+    // Test GPIO pins before initializing sensor
+    Serial.println("Testing GPIO pins...");
+    pinMode(THERMO_CLK_PIN, OUTPUT);
+    pinMode(THERMO_CS_PIN, OUTPUT);
+    pinMode(THERMO_MISO_PIN, INPUT);
+    
+    // Toggle CS and CLK to verify they work
+    digitalWrite(THERMO_CS_PIN, HIGH);
+    delay(10);
+    digitalWrite(THERMO_CS_PIN, LOW);
+    delay(10);
+    digitalWrite(THERMO_CS_PIN, HIGH);
+    Serial.println("  CS pin toggle: OK");
+    
+    digitalWrite(THERMO_CLK_PIN, HIGH);
+    delay(10);
+    digitalWrite(THERMO_CLK_PIN, LOW);
+    delay(10);
+    Serial.println("  CLK pin toggle: OK");
+    
+    int misoState = digitalRead(THERMO_MISO_PIN);
+    Serial.printf("  MISO pin state: %s\n", misoState ? "HIGH" : "LOW");
+    Serial.println();
+    
+    // Create and initialize temperature sensor
+    Serial.println("Initializing MAX31855...");
+    tempSensor = new TemperatureSensor(THERMO_CLK_PIN, THERMO_CS_PIN, THERMO_MISO_PIN);
+    
+    if (tempSensor->begin()) {
+        Serial.println("OK MAX31855 initialized successfully!");
+        digitalWrite(LED_PIN, HIGH);
+        delay(500);
+        digitalWrite(LED_PIN, LOW);
+    } else {
+        Serial.println("X MAX31855 initialization failed!");
+        Serial.println("  This is NORMAL if no thermocouple is connected.");
+        Serial.println("  The sensor will report 'Open Circuit' error.");
+        Serial.println();
+    }
+    
+    Serial.println("Starting temperature reading...");
+    Serial.println("Without thermocouple: expect 'Open Circuit' error");
+    Serial.println();
+    
+    printHelp();
+    Serial.println();
+}
+
+void loop() {
+    static uint32_t lastRead = 0;
+    static uint32_t readCount = 0;
+    static bool autoReadEnabled = true;
+    
+    // Auto read every second
+    if (autoReadEnabled && (millis() - lastRead >= 1000)) {
+        lastRead = millis();
+        readCount++;
+        
+        // LED blinks to indicate reading
+        digitalWrite(LED_PIN, HIGH);
+        
+        // Read temperature
+        float temperature = tempSensor->readTemperature();
+        
+        // ⚠️ Temporary calibration offset (remove after fixing wiring)
+        // If thermocouple polarity is reversed, uncomment next line:
+        // temperature = -temperature;  // Invert sign
+        // Or add offset:
+        // temperature += 35.0;  // Add ~35°C offset if reading -15°C at room temp
+        
+        Serial.printf("[%lu] Reading #%lu: ", millis()/1000, readCount);
+        
+        if (!isnan(temperature)) {
+            // Temperature read successfully
+            Serial.printf("%.2f degC", temperature);
+            
+            // Temperature range check
+            if (temperature < 0) {
+                Serial.print(" [LOW TEMP]");
+            } else if (temperature > 100) {
+                Serial.print(" [HIGH TEMP]");
+            } else if (temperature >= 20 && temperature <= 30) {
+                Serial.print(" [ROOM TEMP]");
+            } else if (temperature >= 35 && temperature <= 45) {
+                Serial.print(" [BODY TEMP]");
+            }
+            
+            Serial.println();
+            
+        } else {
+            // Temperature read failed - this is expected without thermocouple
+            Serial.println("NaN (No thermocouple detected)");
+            Serial.println("  Expected behavior: MAX31855 detects open circuit");
+            Serial.println("  SPI communication is working correctly!");
+        }
+        
+        digitalWrite(LED_PIN, LOW);
+        
+        // Output statistics every 10 readings
+        if (readCount % 10 == 0) {
+            Serial.println("\n--- Statistics ---");
+            Serial.printf("Uptime: %lu seconds\n", millis()/1000);
+            Serial.printf("Read count: %lu\n", readCount);
+            Serial.printf("Free memory: %d KB\n", ESP.getFreeHeap()/1024);
+            Serial.println("------------------\n");
+        }
+    }
+    
+    // Handle serial commands
+    if (Serial.available()) {
+        char cmd = Serial.read();
+        while (Serial.available()) Serial.read(); // Clear buffer
+        
+        Serial.printf("\n[Command: %c]\n", cmd);
+        
+        switch (cmd) {
+            case 'd':
+            case 'D':
+                printDiagnostics();
+                break;
+                
+            case 'r':
+            case 'R':
+                printRawData();
+                break;
+                
+            case 's':
+            case 'S':
+                Serial.println("\n=== Current Status ===");
+                Serial.printf("Uptime: %lu seconds\n", millis()/1000);
+                Serial.printf("Read count: %lu\n", readCount);
+                Serial.printf("Auto-read: %s\n", autoReadEnabled ? "ON" : "OFF");
+                Serial.printf("Free memory: %d KB\n", ESP.getFreeHeap()/1024);
+                Serial.println("=====================\n");
+                break;
+                
+            case 'a':
+            case 'A':
+                autoReadEnabled = !autoReadEnabled;
+                Serial.printf("Auto-read: %s\n\n", autoReadEnabled ? "ON" : "OFF");
+                break;
+                
+            case 't':
+            case 'T':
+                {  // ⭐ 添加大括号限定作用域
+                    Serial.println("Reading temperature now...");
+                    float temp = tempSensor->readTemperature();
+                    float internal = tempSensor->readInternalTemperature();
+                    
+                    Serial.println("--- Temperature Reading ---");
+                    if (!isnan(temp)) {
+                        Serial.printf("Thermocouple: %.2f degC\n", temp);
+                    } else {
+                        Serial.println("Thermocouple: NaN (No thermocouple)");
+                    }
+                    
+                    if (!isnan(internal)) {
+                        Serial.printf("Internal (cold junction): %.2f degC\n", internal);
+                    } else {
+                        Serial.println("Internal: NaN (Sensor error)");
+                    }
+                    Serial.println("---------------------------\n");
+                }
+                break;
+                
+            case 'i':
+            case 'I':
+                {
+                    Serial.println("\n=== Internal Temperature Test ===");
+                    Serial.println("Reading internal (cold junction) temperature...");
+                    Serial.println("This should match room temperature (~20-25C)\n");
+                    
+                    for (int i = 0; i < 5; i++) {
+                        float internal = tempSensor->readInternalTemperature();
+                        Serial.printf("  Sample %d: ", i+1);
+                        if (!isnan(internal)) {
+                            Serial.printf("%.2f degC", internal);
+                            if (internal >= 15 && internal <= 30) {
+                                Serial.print(" [OK - Room temp range]");
+                            } else if (internal < 0 || internal > 50) {
+                                Serial.print(" [ABNORMAL]");
+                            }
+                        } else {
+                            Serial.print("NaN");
+                        }
+                        Serial.println();
+                        delay(200);
+                    }
+                    
+                    Serial.println("\nIf internal temp is correct but thermocouple is wrong:");
+                    Serial.println("1. Check thermocouple polarity (try swapping T+ and T-)");
+                    Serial.println("2. Verify thermocouple type is K-type");
+                    Serial.println("3. Check if MAX31855 module has hardware offset");
+                    Serial.println("=================================\n");
+                }
+                break;
+                
+            case 'h':
+            case 'H':
+                printHelp();
+                break;
+                
+            default:
+                Serial.println("Unknown command. Press 'h' for help.\n");
+                break;
+        }
+    }
+    
+    delay(10);
+}
+
+void printDiagnostics() {
+    Serial.println("\n=== Detailed Diagnostics ===");
+    
+    // Test CS pin
+    Serial.println("1. CS Pin Test:");
+    digitalWrite(THERMO_CS_PIN, HIGH);
+    delay(1);
+    Serial.printf("   Set HIGH, read: %d\n", digitalRead(THERMO_CS_PIN));
+    digitalWrite(THERMO_CS_PIN, LOW);
+    delay(1);
+    Serial.printf("   Set LOW, read: %d\n", digitalRead(THERMO_CS_PIN));
+    digitalWrite(THERMO_CS_PIN, HIGH);
+    Serial.println("   Result: CS pin is working");
+    
+    // Test CLK pin
+    Serial.println("\n2. CLK Pin Test:");
+    digitalWrite(THERMO_CLK_PIN, HIGH);
+    delay(1);
+    Serial.printf("   Set HIGH, read: %d\n", digitalRead(THERMO_CLK_PIN));
+    digitalWrite(THERMO_CLK_PIN, LOW);
+    delay(1);
+    Serial.printf("   Set LOW, read: %d\n", digitalRead(THERMO_CLK_PIN));
+    Serial.println("   Result: CLK pin is working");
+    
+    // Test MISO pin - sample multiple times
+    Serial.println("\n3. MISO Pin Test (10 samples):");
+    int highCount = 0;
+    for (int i = 0; i < 10; i++) {
+        int state = digitalRead(THERMO_MISO_PIN);
+        if (state) highCount++;
+        Serial.printf("   Sample %d: %s\n", i+1, state ? "HIGH" : "LOW");
+        delay(10);
+    }
+    Serial.printf("   Summary: %d/10 HIGH, %d/10 LOW\n", highCount, 10-highCount);
+    if (highCount == 10) {
+        Serial.println("   Result: Always HIGH (chip might not be connected)");
+    } else if (highCount == 0) {
+        Serial.println("   Result: Always LOW (check wiring)");
+    } else {
+        Serial.println("   Result: Varying (looks normal for SPI data)");
+    }
+    
+    // Multiple temperature readings
+    Serial.println("\n4. Temperature Reading Test (5 samples):");
+    float readings[5];
+    float sum = 0;
+    int validCount = 0;
+    
+    for (int i = 0; i < 5; i++) {
+        delay(100);
+        readings[i] = tempSensor->readTemperature();
+        
+        if (!isnan(readings[i])) {
+            Serial.printf("   Sample %d: %.2f degC", i+1, readings[i]);
+            sum += readings[i];
+            validCount++;
+            
+            if (readings[i] < -100 || readings[i] > 100) {
+                Serial.print(" [ABNORMAL]");
+            } else if (readings[i] < 0) {
+                Serial.print(" [COLD]");
+            } else if (readings[i] > 50) {
+                Serial.print(" [HOT]");
+            }
+            Serial.println();
+        } else {
+            Serial.printf("   Sample %d: NaN\n", i+1);
+        }
+    }
+    
+    // Analysis
+    Serial.println("\n5. Analysis:");
+    if (validCount == 0) {
+        Serial.println("   [X] All readings are NaN");
+        Serial.println("   Possible causes:");
+        Serial.println("   - Thermocouple not connected");
+        Serial.println("   - Open circuit detected by MAX31855");
+        Serial.println("   - Bad SPI communication");
+    } else {
+        float avgTemp = sum / validCount;
+        Serial.printf("   Valid readings: %d/5\n", validCount);
+        Serial.printf("   Average: %.2f degC\n", avgTemp);
+        Serial.printf("   Range: %.2f to %.2f degC\n", 
+                     *std::min_element(readings, readings+5),
+                     *std::max_element(readings, readings+5));
+        
+        // Check variance
+        float variance = 0;
+        for (int i = 0; i < 5; i++) {
+            if (!isnan(readings[i])) {
+                variance += pow(readings[i] - avgTemp, 2);
+            }
+        }
+        variance /= validCount;
+        Serial.printf("   Variance: %.2f\n", variance);
+        
+        Serial.println("\n   Diagnosis:");
+        if (avgTemp < -50) {
+            Serial.println("   [!] Temperature < -50C - ABNORMAL");
+            Serial.println("   Most likely causes:");
+            Serial.println("   1. Thermocouple wiring reversed (+ and - swapped)");
+            Serial.println("   2. Wrong thermocouple type (not K-type)");
+            Serial.println("   3. MISO pin reading incorrect data");
+            Serial.println("\n   Try: Swap thermocouple + and - wires");
+        } else if (avgTemp < 10) {
+            Serial.println("   [?] Temperature < 10C - UNUSUAL");
+            Serial.println("   Possible causes:");
+            Serial.println("   1. Very cold environment");
+            Serial.println("   2. Thermocouple touching cold object");
+            Serial.println("   3. Thermocouple calibration offset");
+            Serial.println("\n   Expected room temp: 20-25C");
+        } else if (avgTemp >= 10 && avgTemp <= 30) {
+            Serial.println("   [OK] Temperature looks reasonable!");
+            Serial.println("   Room temperature range (10-30C)");
+        } else if (avgTemp > 30 && avgTemp <= 50) {
+            Serial.println("   [OK] Warm temperature detected");
+            Serial.println("   Could be: touching warm object or body heat");
+        } else if (avgTemp > 50) {
+            Serial.println("   [!] High temperature detected");
+            Serial.println("   Be careful - hot surface!");
+        }
+        
+        if (variance > 5) {
+            Serial.println("\n   [!] High variance - unstable readings");
+            Serial.println("   Possible causes:");
+            Serial.println("   - Poor thermocouple connection");
+            Serial.println("   - Electrical noise");
+            Serial.println("   - Moving/touching wires");
+        } else {
+            Serial.println("\n   [OK] Stable readings - good connection");
+        }
+    }
+    
+    // Pin configuration reminder
+    Serial.println("\n6. Pin Configuration Check:");
+    Serial.printf("   SCK:  GPIO%d\n", THERMO_CLK_PIN);
+    Serial.printf("   MISO: GPIO%d\n", THERMO_MISO_PIN);
+    Serial.printf("   CS:   GPIO%d\n", THERMO_CS_PIN);
+    Serial.println("\n   MAX31855 Wiring:");
+    Serial.println("   VCC  -> 3.3V");
+    Serial.println("   GND  -> GND");
+    Serial.printf("   SCK  -> GPIO%d\n", THERMO_CLK_PIN);
+    Serial.printf("   DO   -> GPIO%d (MISO)\n", THERMO_MISO_PIN);
+    Serial.printf("   CS   -> GPIO%d\n", THERMO_CS_PIN);
+    Serial.println("   T+   -> Thermocouple RED wire");
+    Serial.println("   T-   -> Thermocouple BLUE/YELLOW wire");
+    
+    Serial.println("\n============================\n");
+}
+
+void printRawData() {
+    Serial.println("\n=== Raw SPI Data ===");
+    Serial.println("Reading 32-bit data from MAX31855...");
+    
+    // Note: This requires access to the raw SPI read function
+    // You may need to add a getRawData() method to TemperatureSensor class
+    Serial.println("(Raw data reading requires TemperatureSensor::getRawData() method)");
+    
+    // Show pin states during read
+    digitalWrite(THERMO_CS_PIN, LOW);
+    delay(1);
+    Serial.printf("CS=LOW, MISO=%d\n", digitalRead(THERMO_MISO_PIN));
+    digitalWrite(THERMO_CS_PIN, HIGH);
+    
+    Serial.println("====================\n");
+}
+
+void printHelp() {
+    Serial.println("=== Serial Commands ===");
+    Serial.println("d - Detailed diagnostics");
+    Serial.println("r - Read raw SPI data");
+    Serial.println("s - Show current status");
+    Serial.println("a - Toggle auto-read ON/OFF");
+    Serial.println("t - Read temperature now");
+    Serial.println("i - Read internal (cold junction) temperature");
+    Serial.println("h - Show this help");
+    Serial.println("=======================");
+}

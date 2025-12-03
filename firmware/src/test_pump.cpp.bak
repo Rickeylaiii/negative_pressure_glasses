@@ -1,0 +1,179 @@
+/**
+ * @file test_pump.cpp
+ * @brief Test Vacuum Pump Control
+ * 
+ * Features:
+ * - Manual PWM control of vacuum pump
+ * - Real-time speed adjustment via serial commands
+ * - Default: pump disabled (0% speed)
+ * - LED indicates pump status
+ * 
+ * Serial Commands:
+ * - s<speed>: Set pump speed 0-100%, e.g. "s50" sets to 50%
+ * - on: Start pump at current speed
+ * - off: Stop pump
+ * - p: Print current status
+ * - +: Increase speed by 10%
+ * - -: Decrease speed by 10%
+ * 
+ * Usage:
+ * 1. Compile and upload
+ * 2. Open serial monitor
+ * 3. Send commands to control pump
+ */
+
+#include <Arduino.h>
+#include "config.h"
+#include "PumpController.h"
+
+// LED pin
+#define LED_PIN 8
+
+// Pump controller object
+PumpController* pumpCtrl;
+
+void setup() {
+    // Initialize serial
+    Serial.begin(115200);
+    
+    uint32_t startTime = millis();
+    while (!Serial && (millis() - startTime < 3000)) {
+        delay(10);
+    }
+    delay(500);
+    
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
+    
+    Serial.println("\n\n========================================");
+    Serial.println("Vacuum Pump Control Test");
+    Serial.println("========================================");
+    Serial.printf("Chip: %s @ %dMHz\n", ESP.getChipModel(), ESP.getCpuFreqMHz());
+    Serial.printf("Free Memory: %d KB\n", ESP.getFreeHeap()/1024);
+    Serial.println("========================================\n");
+    
+    // Display pin configuration
+    Serial.println("Pin Configuration:");
+    Serial.printf("  Pump PWM: GPIO%d (Channel %d)\n", PUMP_PWM_PIN, PWM_CHANNEL_PUMP);
+    Serial.printf("  LED:      GPIO%d\n", LED_PIN);
+    Serial.println();
+    
+    // Initialize pump controller
+    Serial.println("Initializing pump controller...");
+    pumpCtrl = new PumpController(PUMP_PWM_PIN, PWM_CHANNEL_PUMP);
+    pumpCtrl->begin();
+    pumpCtrl->setSpeed(0);  // Default: 0% speed
+    
+    Serial.println("Pump controller initialized successfully");
+    Serial.println();
+    
+    Serial.println("Initial State:");
+    Serial.println("  Pump: STOPPED");
+    Serial.println("  Speed: 0%");
+    Serial.println();
+    
+    Serial.println("Serial Commands:");
+    Serial.println("  s<speed> - Set speed 0-100% (e.g. s50)");
+    Serial.println("  on       - Start pump");
+    Serial.println("  off      - Stop pump");
+    Serial.println("  p        - Print status");
+    Serial.println("  +        - Increase speed by 10%");
+    Serial.println("  -        - Decrease speed by 10%");
+    Serial.println();
+    
+    Serial.println("Ready. Pump is STOPPED by default.\n");
+    
+    // LED blink to indicate ready
+    for (int i = 0; i < 3; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(100);
+        digitalWrite(LED_PIN, LOW);
+        delay(100);
+    }
+}
+
+void loop() {
+    static uint32_t lastUpdate = 0;
+    
+    // Update LED indicator every 500ms
+    if (millis() - lastUpdate >= 500) {
+        lastUpdate = millis();
+        
+        // LED indicates pump running state
+        if (pumpCtrl->isRunning()) {
+            // Blinking when running
+            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+        } else {
+            // Off when stopped
+            digitalWrite(LED_PIN, LOW);
+        }
+    }
+    
+    // Handle serial commands
+    if (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+        
+        if (cmd.length() > 0) {
+            char c = cmd.charAt(0);
+            
+            if (c == 's' || c == 'S') {
+                // Set speed
+                int newSpeed = cmd.substring(1).toInt();
+                if (newSpeed >= 0 && newSpeed <= 100) {
+                    pumpCtrl->setSpeed(newSpeed);
+                    Serial.printf("\nSpeed set to: %d%%\n", newSpeed);
+                    if (pumpCtrl->isRunning()) {
+                        Serial.println("Pump is running, new speed applied immediately\n");
+                    } else {
+                        Serial.println("Pump is stopped, send 'on' to start\n");
+                    }
+                } else {
+                    Serial.println("\nSpeed range: 0-100%\n");
+                }
+            }
+            else if (cmd.equalsIgnoreCase("on")) {
+                // Start pump
+                pumpCtrl->start();
+                Serial.printf("\nPump STARTED at %d%%\n\n", pumpCtrl->getSpeed());
+            }
+            else if (cmd.equalsIgnoreCase("off")) {
+                // Stop pump
+                pumpCtrl->stop();
+                Serial.println("\nPump STOPPED\n");
+            }
+            else if (c == 'p' || c == 'P') {
+                // Print status
+                Serial.println("\n=== Pump Status ===");
+                Serial.printf("State: %s\n", pumpCtrl->isRunning() ? "RUNNING" : "STOPPED");
+                Serial.printf("Speed: %d%%\n", pumpCtrl->getSpeed());
+                Serial.printf("PWM Value: %d/255\n", map(pumpCtrl->getSpeed(), 0, 100, 0, 255));
+                Serial.printf("Uptime: %lu seconds\n", millis()/1000);
+                Serial.printf("Free Memory: %d KB\n", ESP.getFreeHeap()/1024);
+                Serial.println("===================\n");
+            }
+            else if (c == '+') {
+                // Increase speed by 10%
+                uint8_t currentSpeed = pumpCtrl->getSpeed();
+                uint8_t newSpeed = currentSpeed + 10;
+                if (newSpeed > 100) newSpeed = 100;
+                pumpCtrl->setSpeed(newSpeed);
+                Serial.printf("\nSpeed increased: %d%% -> %d%%\n\n", currentSpeed, newSpeed);
+            }
+            else if (c == '-') {
+                // Decrease speed by 10%
+                uint8_t currentSpeed = pumpCtrl->getSpeed();
+                int newSpeed = currentSpeed - 10;
+                if (newSpeed < 0) newSpeed = 0;
+                pumpCtrl->setSpeed((uint8_t)newSpeed);
+                Serial.printf("\nSpeed decreased: %d%% -> %d%%\n\n", currentSpeed, (uint8_t)newSpeed);
+            }
+            else {
+                Serial.println("\nUnknown command");
+                Serial.println("Available: s<speed>, on, off, p, +, -\n");
+            }
+        }
+    }
+    
+    delay(10);
+}
